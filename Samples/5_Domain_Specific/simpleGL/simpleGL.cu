@@ -409,6 +409,52 @@ bool runTest(int argc, char **argv, char *ref_file)
     return true;
 }
 
+bool glfw_runTest(int argc, char** argv, char* ref_file) {
+    // Create the CUTIL timer
+    sdkCreateTimer(&timer);
+
+    // use command-line specified CUDA device, otherwise use device with highest Gflops/s
+    int devID = findCudaDevice(argc, (const char**)argv);
+
+    // command line mode only
+    if (ref_file != NULL)
+    {
+        // create VBO
+        checkCudaErrors(cudaMalloc((void**)&d_vbo_buffer, mesh_width * mesh_height * 4 * sizeof(float)));
+
+        // run the cuda part
+        runAutoTest(devID, argv, ref_file);
+
+        // check result of Cuda step
+        checkResultCuda(argc, argv, vbo);
+
+        cudaFree(d_vbo_buffer);
+        d_vbo_buffer = NULL;
+    }
+    else
+    {
+        // First initialize OpenGL context, so we can properly set the GL for CUDA.
+        // This is necessary in order to achieve optimal performance with OpenGL/CUDA interop.
+        if (false == initGL(&argc, argv))
+        {
+            return false;
+        }
+
+        // create VBO
+        createVBO(&vbo, &cuda_vbo_resource, cudaGraphicsMapFlagsWriteDiscard);
+
+        // run the cuda part
+        runCuda(&cuda_vbo_resource);
+
+        // start rendering mainloop
+        while (!glfwWindowShouldClose(window)) {
+            glfw_display();
+        }
+    }
+
+    return true;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 //! Run the Cuda part of the computation
 ////////////////////////////////////////////////////////////////////////////////
@@ -581,6 +627,7 @@ void glfw_display() {
     glDisableClientState(GL_VERTEX_ARRAY);
 
     glfwSwapBuffers(window);
+    glfwPollEvents();
 
     g_fAnim += 0.01f;
 
