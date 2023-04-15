@@ -64,6 +64,10 @@
 #include <GL/freeglut.h>
 #endif
 
+// Alternative, newer graphics libraries (compared to freeglut)
+#include "GL/glew.h"
+#include "GL/glfw3.h"
+
 // includes, cuda
 #include <cuda_runtime.h>
 #include <cuda_gl_interop.h>
@@ -82,6 +86,7 @@
 
 ////////////////////////////////////////////////////////////////////////////////
 // constants
+GLFWwindow* window;
 const unsigned int window_width  = 512;
 const unsigned int window_height = 512;
 
@@ -102,6 +107,9 @@ float rotate_x = 0.0, rotate_y = 0.0;
 float translate_z = -3.0;
 
 StopWatchInterface *timer = NULL;
+
+// glfw mouse controls
+double glfw_mouse_old_y, glfw_mouse_old_x;
 
 // Auto-Verification Code
 int fpsCount = 0;        // FPS count for averaging
@@ -141,6 +149,12 @@ void runAutoTest(int devID, char **argv, char *ref_file);
 void checkResultCuda(int argc, char **argv, const GLuint &vbo);
 
 const char *sSDKsample = "simpleGL (VBO)";
+
+// GLFW functions
+void glfw_keyboard(GLFWwindow* window, int key, int scancode, int action, int mods);
+void glfw_mouse(GLFWwindow* window, int button, int action, int mods);
+void glfw_cursor_pos_callback(GLFWwindow* window, double xpos, double ypos);
+void glfw_display();
 
 ///////////////////////////////////////////////////////////////////////////////
 //! Simple kernel to modify vertex positions in sine wave pattern
@@ -261,6 +275,74 @@ bool initGL(int *argc, char **argv)
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     gluPerspective(60.0, (GLfloat)window_width / (GLfloat) window_height, 0.1, 10.0);
+
+    SDK_CHECK_ERROR_GL();
+
+    return true;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+//! Initialize GL with GLFW
+////////////////////////////////////////////////////////////////////////////////
+void framebuffer_size_callback(GLFWwindow* window, int width, int height)
+{
+    glViewport(0, 0, width, height);
+}
+
+bool glfw_initGL(int* argc, char** argv)
+{
+    if (!glfwInit())
+        exit(EXIT_FAILURE);
+
+    // Create window
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 4);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+    window = glfwCreateWindow(window_width, window_height, "Cuda GL Interop(VBO)", NULL, NULL);
+    if (NULL == window)
+    {
+        fprintf(stderr, "Failed to create GLFW window.\n");
+        glfwTerminate();
+        return EXIT_FAILURE;
+    }
+    glfwMakeContextCurrent(window);
+
+    // Set callbacks
+    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+    glfwSetKeyCallback(window, glfw_keyboard);
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    glfwSetCursorPosCallback(window, glfw_cursor_pos_callback);
+    glfwSetMouseButtonCallback(window, glfw_mouse);
+
+    GLenum glerr = glewInit();
+    if (GLEW_OK != glerr)
+    {
+        fprintf(stderr, "glewInit Error: %s\n", glewGetErrorString(glerr));
+    }
+
+    //glutTimerFunc(REFRESH_DELAY, timerEvent, 0);
+
+    // initialize necessary OpenGL extensions
+    if (!isGLVersionSupported(2, 0))
+    {
+        fprintf(stderr, "ERROR: Support for necessary OpenGL extensions missing.");
+        fflush(stderr);
+        return false;
+    }
+
+    // default initialization
+    glClearColor(0.0, 0.0, 0.0, 1.0);
+    glDisable(GL_DEPTH_TEST);
+
+    // viewport
+    glViewport(0, 0, window_width, window_height);
+
+    // projection
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(60.0, (GLfloat)window_width / (GLfloat)window_height, 0.1, 10.0);
 
     SDK_CHECK_ERROR_GL();
 
@@ -474,6 +556,38 @@ void display()
     computeFPS();
 }
 
+void glfw_display() {
+    //sdkStartTimer(&timer);
+
+    // run CUDA kernel to generate vertex positions
+    runCuda(&cuda_vbo_resource);
+
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // set view matrix
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glTranslatef(0.0, 0.0, translate_z);
+    glRotatef(rotate_x, 1.0, 0.0, 0.0);
+    glRotatef(rotate_y, 0.0, 1.0, 0.0);
+
+    // render from the vbo
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glVertexPointer(4, GL_FLOAT, 0, 0);
+
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glColor3f(1.0, 0.0, 0.0);
+    glDrawArrays(GL_POINTS, 0, mesh_width * mesh_height);
+    glDisableClientState(GL_VERTEX_ARRAY);
+
+    glfwSwapBuffers(window);
+
+    g_fAnim += 0.01f;
+
+    //sdkStopTimer(&timer);
+    //computeFPS();
+}
+
 void timerEvent(int value)
 {
     if (glutGetWindow())
@@ -511,6 +625,17 @@ void keyboard(unsigned char key, int /*x*/, int /*y*/)
     }
 }
 
+void glfw_keyboard(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    switch (key)
+    {
+    case GLFW_KEY_ESCAPE:
+        if (action == GLFW_PRESS) {
+            glfwSetWindowShouldClose(window, true);
+            printf("KEY: ESCAPE PRESSED => EXIT");
+        }
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 //! Mouse event handlers
 ////////////////////////////////////////////////////////////////////////////////
@@ -527,6 +652,33 @@ void mouse(int button, int state, int x, int y)
 
     mouse_old_x = x;
     mouse_old_y = y;
+}
+
+void glfw_mouse(GLFWwindow* window, int button, int action, int mods) {
+    if (action == GLFW_PRESS) {
+        mouse_buttons |= 1 << button;
+        glfwGetCursorPos(window, &glfw_mouse_old_x, &glfw_mouse_old_y);
+    } 
+    else if (action == GLFW_RELEASE) {
+        mouse_buttons = 0;
+    }
+}
+
+void glfw_cursor_pos_callback(GLFWwindow* window, double xpos, double ypos) {
+    double dx, dy;
+    dx = (double)(xpos - glfw_mouse_old_x);
+    dy = (double)(ypos - glfw_mouse_old_y);
+
+    if (mouse_buttons & (1 << GLFW_MOUSE_BUTTON_LEFT)) {
+        rotate_x += dy * 0.2f;
+        rotate_y += dx * 0.2f;
+    }
+    else if (mouse_buttons & (1 << GLFW_MOUSE_BUTTON_RIGHT)) {
+        translate_z += dy * 0.01f;
+    }
+
+    mouse_old_x = xpos;
+    mouse_old_y = ypos;
 }
 
 void motion(int x, int y)
