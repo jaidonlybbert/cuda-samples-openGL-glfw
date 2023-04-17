@@ -45,6 +45,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include "GL/glm/glm.hpp"
+#include "GL/glm/gtc/matrix_transform.hpp"
+#include "GL/glm/gtc/matrix_access.hpp"
+#include "GL/glm/gtc/matrix_inverse.hpp"
+#include "GL/glm/gtc/type_ptr.hpp"
 
 #ifdef _WIN32
 #  define WINDOWS_LEAN_AND_MEAN
@@ -53,16 +58,16 @@
 #endif
 
 // OpenGL Graphics includes
-#include <helper_gl.h>
-#if defined (__APPLE__) || defined(MACOSX)
-  #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-  #include <GLUT/glut.h>
-  #ifndef glutCloseFunc
-  #define glutCloseFunc glutWMCloseFunc
-  #endif
-#else
-#include <GL/freeglut.h>
-#endif
+//#include <helper_gl.h>
+//#if defined (__APPLE__) || defined(MACOSX)
+//  #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+//  #include <GLUT/glut.h>
+//  #ifndef glutCloseFunc
+//  #define glutCloseFunc glutWMCloseFunc
+//  #endif
+//#else
+//#include <GL/freeglut.h>
+//#endif
 
 // Alternative, newer graphics libraries (compared to freeglut)
 #include "GL/glew.h"
@@ -79,6 +84,8 @@
 #include <helper_cuda.h>         // helper functions for CUDA error check
 
 #include <vector_types.h>
+#include "polar.h"
+#include "shaderWrapper.h"
 
 #define MAX_EPSILON_ERROR 10.0f
 #define THRESHOLD          0.30f
@@ -104,12 +111,27 @@ float g_fAnim = 0.0;
 int mouse_old_x, mouse_old_y;
 int mouse_buttons = 0;
 float rotate_x = 0.0, rotate_y = 0.0;
-float translate_z = -3.0;
+float translate_z = 1.0;
 
 StopWatchInterface *timer = NULL;
 
 // glfw mouse controls
 double glfw_mouse_old_y, glfw_mouse_old_x;
+
+// Camera coordinates
+glm::vec3 g_eyePosPolar(translate_z, rotate_x, rotate_y);
+glm::vec3 g_eyePosCartesian(polarToCartesianPoint(g_eyePosPolar));
+//glm::vec3 g_eyePosCartesian(0, 0, 1.0);
+// Vectors for view matrix
+glm::vec3 g_look_at_point(0.0, 0.0, 0.0);
+glm::vec3 g_up_vector(0.0, 1.0, 0.0);
+// View matrix
+glm::mat4 g_viewMTX = glm::lookAt(g_eyePosCartesian, g_look_at_point, g_up_vector);
+// Model matrix initialized as identity
+glm::mat4 g_modelMTX(1.0f);
+glm::mat4 g_projMTX = glm::perspective((GLfloat)glm::radians(60.0f), (GLfloat)1.0, (GLfloat)(0.1), (GLfloat)(300));
+// Enums
+GLint g_ProgramID;
 
 // Auto-Verification Code
 int fpsCount = 0;        // FPS count for averaging
@@ -127,7 +149,6 @@ char **pArgv = NULL;
 
 ////////////////////////////////////////////////////////////////////////////////
 // declaration, forward
-bool runTest(int argc, char **argv, char *ref_file);
 void cleanup();
 
 // GL functionality
@@ -135,13 +156,6 @@ bool initGL(int *argc, char **argv);
 void createVBO(GLuint *vbo, struct cudaGraphicsResource **vbo_res,
                unsigned int vbo_res_flags);
 void deleteVBO(GLuint *vbo, struct cudaGraphicsResource *vbo_res);
-
-// rendering callbacks
-void display();
-void keyboard(unsigned char key, int x, int y);
-void mouse(int button, int state, int x, int y);
-void motion(int x, int y);
-void timerEvent(int value);
 
 // Cuda functionality
 void runCuda(struct cudaGraphicsResource **vbo_resource);
@@ -155,6 +169,16 @@ void glfw_keyboard(GLFWwindow* window, int key, int scancode, int action, int mo
 void glfw_mouse(GLFWwindow* window, int button, int action, int mods);
 void glfw_cursor_pos_callback(GLFWwindow* window, double xpos, double ypos);
 void glfw_display();
+bool glfw_runTest(int argc, char** argv, char* ref_file);
+
+void init_shaders()
+{
+    CShader myShaderWrap(".\\v_shader.glsl", ".\\f_shader.glsl");
+
+    g_ProgramID = myShaderWrap.getProgram();
+
+    myShaderWrap.use();
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 //! Simple kernel to modify vertex positions in sine wave pattern
@@ -189,6 +213,42 @@ void launch_kernel(float4 *pos, unsigned int mesh_width,
     simple_vbo_kernel<<< grid, block>>>(pos, mesh_width, mesh_height, time);
 }
 
+struct point3 {
+    GLfloat x;
+    GLfloat y;
+    GLfloat z;
+};
+
+struct point4 {
+    GLfloat x;
+    GLfloat y;
+    GLfloat z;
+    GLfloat w;
+};
+
+struct vertatt {
+    point3 vertex;
+    point4 color;
+};
+
+vertatt triangle[3] = {
+    {-1.0, -1.0, 0.0, 1.0, 0, 0, 1.0},
+    {1.0, -1.0, 0.0, 1.0, 0, 0, 1.0},
+    {0, 1.0, 0.0, 1.0, 0, 0, 1.0}
+};
+
+GLuint tri_vao;
+GLuint tri_vbo;
+
+void basic_triangle_vbo() {
+    glGenVertexArrays(1, &tri_vao);
+    glBindVertexArray(tri_vao);
+
+    glGenBuffers(1, &tri_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, tri_vbo);
+    glBufferData(GL_ARRAY_BUFFER, 3 * 7 * sizeof(GLfloat), triangle, GL_STATIC_DRAW);
+}
+
 
 ////////////////////////////////////////////////////////////////////////////////
 // Program main
@@ -217,68 +277,10 @@ int main(int argc, char **argv)
 
     printf("\n");
 
-    runTest(argc, argv, ref_file);
+    glfw_runTest(argc, argv, ref_file);
 
     printf("%s completed, returned %s\n", sSDKsample, (g_TotalErrors == 0) ? "OK" : "ERROR!");
     exit(g_TotalErrors == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
-}
-
-void computeFPS()
-{
-    frameCount++;
-    fpsCount++;
-
-    if (fpsCount == fpsLimit)
-    {
-        avgFPS = 1.f / (sdkGetAverageTimerValue(&timer) / 1000.f);
-        fpsCount = 0;
-        fpsLimit = (int)MAX(avgFPS, 1.f);
-
-        sdkResetTimer(&timer);
-    }
-
-    char fps[256];
-    sprintf(fps, "Cuda GL Interop (VBO): %3.1f fps (Max 100Hz)", avgFPS);
-    glutSetWindowTitle(fps);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-//! Initialize GL
-////////////////////////////////////////////////////////////////////////////////
-bool initGL(int *argc, char **argv)
-{
-    glutInit(argc, argv);
-    glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
-    glutInitWindowSize(window_width, window_height);
-    glutCreateWindow("Cuda GL Interop (VBO)");
-    glutDisplayFunc(display);
-    glutKeyboardFunc(keyboard);
-    glutMotionFunc(motion);
-    glutTimerFunc(REFRESH_DELAY, timerEvent,0);
-
-    // initialize necessary OpenGL extensions
-    if (! isGLVersionSupported(2,0))
-    {
-        fprintf(stderr, "ERROR: Support for necessary OpenGL extensions missing.");
-        fflush(stderr);
-        return false;
-    }
-
-    // default initialization
-    glClearColor(0.0, 0.0, 0.0, 1.0);
-    glDisable(GL_DEPTH_TEST);
-
-    // viewport
-    glViewport(0, 0, window_width, window_height);
-
-    // projection
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    gluPerspective(60.0, (GLfloat)window_width / (GLfloat) window_height, 0.1, 10.0);
-
-    SDK_CHECK_ERROR_GL();
-
-    return true;
 }
 
 
@@ -322,16 +324,6 @@ bool glfw_initGL(int* argc, char** argv)
         fprintf(stderr, "glewInit Error: %s\n", glewGetErrorString(glerr));
     }
 
-    //glutTimerFunc(REFRESH_DELAY, timerEvent, 0);
-
-    // initialize necessary OpenGL extensions
-    if (!isGLVersionSupported(2, 0))
-    {
-        fprintf(stderr, "ERROR: Support for necessary OpenGL extensions missing.");
-        fflush(stderr);
-        return false;
-    }
-
     // default initialization
     glClearColor(0.0, 0.0, 0.0, 1.0);
     glDisable(GL_DEPTH_TEST);
@@ -339,72 +331,9 @@ bool glfw_initGL(int* argc, char** argv)
     // viewport
     glViewport(0, 0, window_width, window_height);
 
-    // projection
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    gluPerspective(60.0, (GLfloat)window_width / (GLfloat)window_height, 0.1, 10.0);
+    init_shaders();
 
-    SDK_CHECK_ERROR_GL();
-
-    return true;
-}
-
-
-////////////////////////////////////////////////////////////////////////////////
-//! Run a simple test for CUDA
-////////////////////////////////////////////////////////////////////////////////
-bool runTest(int argc, char **argv, char *ref_file)
-{
-    // Create the CUTIL timer
-    sdkCreateTimer(&timer);
-
-    // use command-line specified CUDA device, otherwise use device with highest Gflops/s
-    int devID = findCudaDevice(argc, (const char **)argv);
-
-    // command line mode only
-    if (ref_file != NULL)
-    {
-        // create VBO
-        checkCudaErrors(cudaMalloc((void **)&d_vbo_buffer, mesh_width*mesh_height*4*sizeof(float)));
-
-        // run the cuda part
-        runAutoTest(devID, argv, ref_file);
-
-        // check result of Cuda step
-        checkResultCuda(argc, argv, vbo);
-
-        cudaFree(d_vbo_buffer);
-        d_vbo_buffer = NULL;
-    }
-    else
-    {
-        // First initialize OpenGL context, so we can properly set the GL for CUDA.
-        // This is necessary in order to achieve optimal performance with OpenGL/CUDA interop.
-        if (false == initGL(&argc, argv))
-        {
-            return false;
-        }
-
-        // register callbacks
-        glutDisplayFunc(display);
-        glutKeyboardFunc(keyboard);
-        glutMouseFunc(mouse);
-        glutMotionFunc(motion);
-#if defined (__APPLE__) || defined(MACOSX)
-        atexit(cleanup);
-#else
-        glutCloseFunc(cleanup);
-#endif
-
-        // create VBO
-        createVBO(&vbo, &cuda_vbo_resource, cudaGraphicsMapFlagsWriteDiscard);
-
-        // run the cuda part
-        runCuda(&cuda_vbo_resource);
-
-        // start rendering mainloop
-        glutMainLoop();
-    }
+    glerr = glGetError();
 
     return true;
 }
@@ -435,7 +364,7 @@ bool glfw_runTest(int argc, char** argv, char* ref_file) {
     {
         // First initialize OpenGL context, so we can properly set the GL for CUDA.
         // This is necessary in order to achieve optimal performance with OpenGL/CUDA interop.
-        if (false == initGL(&argc, argv))
+        if (false == glfw_initGL(&argc, argv))
         {
             return false;
         }
@@ -445,6 +374,8 @@ bool glfw_runTest(int argc, char** argv, char* ref_file) {
 
         // run the cuda part
         runCuda(&cuda_vbo_resource);
+
+        basic_triangle_vbo();
 
         // start rendering mainloop
         while (!glfwWindowShouldClose(window)) {
@@ -548,7 +479,7 @@ void createVBO(GLuint *vbo, struct cudaGraphicsResource **vbo_res,
     // register this buffer object with CUDA
     checkCudaErrors(cudaGraphicsGLRegisterBuffer(vbo_res, *vbo, vbo_res_flags));
 
-    SDK_CHECK_ERROR_GL();
+    //SDK_CHECK_ERROR_GL();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -569,38 +500,6 @@ void deleteVBO(GLuint *vbo, struct cudaGraphicsResource *vbo_res)
 ////////////////////////////////////////////////////////////////////////////////
 //! Display callback
 ////////////////////////////////////////////////////////////////////////////////
-void display()
-{
-    sdkStartTimer(&timer);
-
-    // run CUDA kernel to generate vertex positions
-    runCuda(&cuda_vbo_resource);
-
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    // set view matrix
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-    glTranslatef(0.0, 0.0, translate_z);
-    glRotatef(rotate_x, 1.0, 0.0, 0.0);
-    glRotatef(rotate_y, 0.0, 1.0, 0.0);
-
-    // render from the vbo
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glVertexPointer(4, GL_FLOAT, 0, 0);
-
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glColor3f(1.0, 0.0, 0.0);
-    glDrawArrays(GL_POINTS, 0, mesh_width * mesh_height);
-    glDisableClientState(GL_VERTEX_ARRAY);
-
-    glutSwapBuffers();
-
-    g_fAnim += 0.01f;
-
-    sdkStopTimer(&timer);
-    computeFPS();
-}
 
 void glfw_display() {
     //sdkStartTimer(&timer);
@@ -608,24 +507,38 @@ void glfw_display() {
     // run CUDA kernel to generate vertex positions
     runCuda(&cuda_vbo_resource);
 
+    glClearColor(0.0f, 0.4f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
-    // set view matrix
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-    glTranslatef(0.0, 0.0, translate_z);
-    glRotatef(rotate_x, 1.0, 0.0, 0.0);
-    glRotatef(rotate_y, 0.0, 1.0, 0.0);
+    // Process input to update view matrix
+    g_eyePosPolar = glm::vec3(translate_z, rotate_x, rotate_y);
+    g_eyePosCartesian = glm::vec3(polarToCartesianPoint(g_eyePosPolar));
+    g_viewMTX = glm::lookAt(g_eyePosCartesian, g_look_at_point, g_up_vector);
+    
+    // Set uniforms
+    // MVP transforms
+    glUniformMatrix4fv(glGetUniformLocation(g_ProgramID, "model"), GL_ONE, GL_FALSE, glm::value_ptr(g_modelMTX));
+    glUniformMatrix4fv(glGetUniformLocation(g_ProgramID, "view"), GL_ONE, GL_FALSE, glm::value_ptr(g_viewMTX));
+    glUniformMatrix4fv(glGetUniformLocation(g_ProgramID, "proj"), GL_ONE, GL_FALSE, glm::value_ptr(g_projMTX));
 
-    // render from the vbo
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glVertexPointer(4, GL_FLOAT, 0, 0);
+    // Bind vertex array (cuda interop)
+    glBindVertexArray(tri_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, tri_vbo);
 
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glColor3f(1.0, 0.0, 0.0);
-    glDrawArrays(GL_POINTS, 0, mesh_width * mesh_height);
-    glDisableClientState(GL_VERTEX_ARRAY);
+    GLuint loc = glGetAttribLocation(g_ProgramID, "vPosition");
+    glEnableVertexAttribArray(loc);
+    glVertexAttribPointer(loc, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(GL_FLOAT), (void*)0);
+    GLuint clr = glGetAttribLocation(g_ProgramID, "vColor");
+    glEnableVertexAttribArray(clr);
+    glVertexAttribPointer(clr, 4, GL_FLOAT, GL_FALSE, 7 * sizeof(GL_FLOAT), (void*)(3 * sizeof(float)));
 
+    // Draw Arrays
+    // Reset pointers??
+    glDrawArrays(GL_TRIANGLES, 0, 3 * 7 * sizeof(GLfloat));
+    //glDrawArrays(GL_POINTS, 0, mesh_width * mesh_height);
+    glFlush();
+    
     glfwSwapBuffers(window);
     glfwPollEvents();
 
@@ -633,15 +546,6 @@ void glfw_display() {
 
     //sdkStopTimer(&timer);
     //computeFPS();
-}
-
-void timerEvent(int value)
-{
-    if (glutGetWindow())
-    {
-        glutPostRedisplay();
-        glutTimerFunc(REFRESH_DELAY, timerEvent,0);
-    }
 }
 
 void cleanup()
@@ -658,19 +562,6 @@ void cleanup()
 ////////////////////////////////////////////////////////////////////////////////
 //! Keyboard events handler
 ////////////////////////////////////////////////////////////////////////////////
-void keyboard(unsigned char key, int /*x*/, int /*y*/)
-{
-    switch (key)
-    {
-        case (27) :
-            #if defined(__APPLE__) || defined(MACOSX)
-                exit(EXIT_SUCCESS);
-            #else
-                glutDestroyWindow(glutGetWindow());
-                return;
-            #endif
-    }
-}
 
 void glfw_keyboard(GLFWwindow* window, int key, int scancode, int action, int mods) {
     switch (key)
@@ -686,20 +577,6 @@ void glfw_keyboard(GLFWwindow* window, int key, int scancode, int action, int mo
 ////////////////////////////////////////////////////////////////////////////////
 //! Mouse event handlers
 ////////////////////////////////////////////////////////////////////////////////
-void mouse(int button, int state, int x, int y)
-{
-    if (state == GLUT_DOWN)
-    {
-        mouse_buttons |= 1<<button;
-    }
-    else if (state == GLUT_UP)
-    {
-        mouse_buttons = 0;
-    }
-
-    mouse_old_x = x;
-    mouse_old_y = y;
-}
 
 void glfw_mouse(GLFWwindow* window, int button, int action, int mods) {
     if (action == GLFW_PRESS) {
@@ -717,11 +594,11 @@ void glfw_cursor_pos_callback(GLFWwindow* window, double xpos, double ypos) {
     dy = (double)(ypos - glfw_mouse_old_y);
 
     if (mouse_buttons & (1 << GLFW_MOUSE_BUTTON_LEFT)) {
-        rotate_x += dy * 0.2f;
-        rotate_y += dx * 0.2f;
+        rotate_x += dy * 0.02f;
+        rotate_y += dx * 0.02f;
     }
     else if (mouse_buttons & (1 << GLFW_MOUSE_BUTTON_RIGHT)) {
-        translate_z += dy * 0.01f;
+        translate_z += dy * 0.001f;
     }
 
     mouse_old_x = xpos;
@@ -780,6 +657,6 @@ void checkResultCuda(int argc, char **argv, const GLuint &vbo)
         checkCudaErrors(cudaGraphicsGLRegisterBuffer(&cuda_vbo_resource, vbo,
                                                      cudaGraphicsMapFlagsWriteDiscard));
 
-        SDK_CHECK_ERROR_GL();
+        //SDK_CHECK_ERROR_GL();
     }
 }
