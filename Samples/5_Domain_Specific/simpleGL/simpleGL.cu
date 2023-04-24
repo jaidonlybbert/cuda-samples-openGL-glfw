@@ -94,15 +94,18 @@
 ////////////////////////////////////////////////////////////////////////////////
 // constants
 GLFWwindow* window;
-const unsigned int window_width  = 512;
-const unsigned int window_height = 512;
+const unsigned int window_width  = 1024;
+const unsigned int window_height = 1024;
 
-const unsigned int mesh_width    = 256;
-const unsigned int mesh_height   = 256;
+const unsigned int mesh_width    = 1024;
+const unsigned int mesh_height   = 1024;
 
 // vbo variables
 GLuint vbo;
+GLuint g_texvbo;
 struct cudaGraphicsResource *cuda_vbo_resource;
+struct cudaGraphicsResource* cuda_texture;
+float4* gl_texture_data;
 void *d_vbo_buffer = NULL;
 
 float g_fAnim = 0.0;
@@ -208,7 +211,7 @@ void launch_kernel(float4 *pos, unsigned int mesh_width,
                    unsigned int mesh_height, float time)
 {
     // execute the kernel
-    dim3 block(8, 8, 1);
+    dim3 block(8, 8, 1); // 256 threads per block for cc 8.6
     dim3 grid(mesh_width / block.x, mesh_height / block.y, 1);
     simple_vbo_kernel<<< grid, block>>>(pos, mesh_width, mesh_height, time);
 }
@@ -338,6 +341,27 @@ bool glfw_initGL(int* argc, char** argv)
     return true;
 }
 
+
+
+void cudaRegisterTexture(GLuint* vbo, struct cudaGraphicsResource** vbo_res)
+{
+    assert(vbo);
+
+    glActiveTexture(GL_TEXTURE0);
+    glGenTextures(1, vbo);
+    glEnable(GL_TEXTURE_2D);
+    glBindTextureUnit(0, *vbo);
+    glBindTexture(GL_TEXTURE_2D, *vbo);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, mesh_width, mesh_height, 0, GL_RGBA, GL_FLOAT, gl_texture_data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    cudaGraphicsGLRegisterImage(&cuda_texture, *vbo, GL_TEXTURE_2D, cudaGraphicsRegisterFlagsSurfaceLoadStore);
+}
+
 bool glfw_runTest(int argc, char** argv, char* ref_file) {
     // Create the CUTIL timer
     sdkCreateTimer(&timer);
@@ -369,11 +393,21 @@ bool glfw_runTest(int argc, char** argv, char* ref_file) {
             return false;
         }
 
-        // create VBO
+        // create position VBO
         createVBO(&vbo, &cuda_vbo_resource, cudaGraphicsMapFlagsWriteDiscard);
 
         // run the cuda part
-        runCuda(&cuda_vbo_resource);
+        //runCuda(&cuda_vbo_resource);
+
+        gl_texture_data = (float4*)malloc(mesh_height * mesh_width * sizeof(float4));
+
+        for (int i = 0; i < mesh_height; i++) {
+            for (int j = 0; j < mesh_width; j++) {
+                gl_texture_data[i * mesh_width + j] = make_float4(0, 1, 0, 1);
+            }
+        }
+
+        cudaRegisterTexture(&g_texvbo, &cuda_texture);
 
         basic_triangle_vbo();
 
@@ -409,6 +443,49 @@ void runCuda(struct cudaGraphicsResource **vbo_resource)
     // unmap buffer object
     checkCudaErrors(cudaGraphicsUnmapResources(1, vbo_resource, 0));
 }
+
+__global__
+void launch_tex_kernel(cudaSurfaceObject_t surface, int width, int height, float time)
+{
+    unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // calculate uv coordinates
+    float u = x / (float)width;
+    float v = y / (float)height;
+    u = u * 2.0f - 1.0f;
+    v = v * 2.0f - 1.0f;
+
+    // calculate simple sine wave pattern
+    float freq = 4.0f;
+    float w = sinf(u * freq + time) * cosf(v * freq + time) * 0.5f;
+
+    // write output vertex
+    //dptr[y * width + x] = make_float4(u, w, v, 1.0f);
+    surf2Dwrite(make_float4(1.0 - abs(w)*2, abs(w)*2, 0.0, 1.0f), surface, x * sizeof(float4), y);
+}
+
+cudaResourceDesc g_surfaceDesc;
+
+void cudaRunTex(cudaGraphicsResource_t* vbo_resource) {
+    cudaArray* dptr;
+    checkCudaErrors(cudaGraphicsMapResources(1, vbo_resource, 0));
+    checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&dptr, *vbo_resource, 0, 0));
+
+    // Get surface object to interface with cudaArray
+    cudaSurfaceObject_t surfaceObj;
+    g_surfaceDesc.res.array.array = dptr;
+    checkCudaErrors(cudaCreateSurfaceObject(&surfaceObj, &g_surfaceDesc));
+
+    dim3 blockDim(8, 8, 1);
+    dim3 gridDim(mesh_width / blockDim.x, mesh_height / blockDim.y, 1);
+    launch_tex_kernel<<<gridDim, blockDim>>>(surfaceObj, mesh_width, mesh_height, g_fAnim); 
+    cudaDeviceSynchronize();
+
+    checkCudaErrors(cudaGraphicsUnmapResources(1, vbo_resource, 0));
+}
+
+
 
 #ifdef _WIN32
 #ifndef FOPEN
@@ -482,6 +559,8 @@ void createVBO(GLuint *vbo, struct cudaGraphicsResource **vbo_res,
     //SDK_CHECK_ERROR_GL();
 }
 
+
+
 ////////////////////////////////////////////////////////////////////////////////
 //! Delete VBO
 ////////////////////////////////////////////////////////////////////////////////
@@ -506,43 +585,55 @@ void glfw_display() {
 
     // run CUDA kernel to generate vertex positions
     runCuda(&cuda_vbo_resource);
+    cudaRunTex(&cuda_texture);
 
-    glClearColor(0.0f, 0.4f, 0.6f, 1.0f);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
     // Process input to update view matrix
-    g_eyePosPolar = glm::vec3(translate_z, rotate_x, rotate_y);
+    g_eyePosPolar = glm::vec3(translate_z, 0, 0);
     g_eyePosCartesian = glm::vec3(polarToCartesianPoint(g_eyePosPolar));
     g_viewMTX = glm::lookAt(g_eyePosCartesian, g_look_at_point, g_up_vector);
-    
+
     // Set uniforms
     // MVP transforms
     glUniformMatrix4fv(glGetUniformLocation(g_ProgramID, "model"), GL_ONE, GL_FALSE, glm::value_ptr(g_modelMTX));
     glUniformMatrix4fv(glGetUniformLocation(g_ProgramID, "view"), GL_ONE, GL_FALSE, glm::value_ptr(g_viewMTX));
     glUniformMatrix4fv(glGetUniformLocation(g_ProgramID, "proj"), GL_ONE, GL_FALSE, glm::value_ptr(g_projMTX));
+    glUniform1i(glGetUniformLocation(g_ProgramID, "tex0"), GL_TEXTURE0);
 
     // Bind vertex array (cuda interop)
-    glBindVertexArray(tri_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, tri_vbo);
+    //glBindVertexArray(tri_vao);
+    //glBindBuffer(GL_ARRAY_BUFFER, tri_vbo);
+    //GLuint loc = glGetAttribLocation(g_ProgramID, "vPosition");
+    //glEnableVertexAttribArray(loc);
+    //glVertexAttribPointer(loc, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(GL_FLOAT), (void*)0);
+    //GLuint clr = glGetAttribLocation(g_ProgramID, "vColor");
+    //glEnableVertexAttribArray(clr);
+    //glVertexAttribPointer(clr, 4, GL_FLOAT, GL_FALSE, 7 * sizeof(GL_FLOAT), (void*)(3 * sizeof(float)));
 
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
     GLuint loc = glGetAttribLocation(g_ProgramID, "vPosition");
     glEnableVertexAttribArray(loc);
-    glVertexAttribPointer(loc, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(GL_FLOAT), (void*)0);
-    GLuint clr = glGetAttribLocation(g_ProgramID, "vColor");
-    glEnableVertexAttribArray(clr);
-    glVertexAttribPointer(clr, 4, GL_FLOAT, GL_FALSE, 7 * sizeof(GL_FLOAT), (void*)(3 * sizeof(float)));
+    glVertexAttribPointer(loc, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(GL_FLOAT), (void*)0);
+    //GLuint clr = glGetAttribLocation(g_ProgramID, "vColor");
+    //glEnableVertexAttribArray(clr);
+    //glVertexAttribPointer(clr, 4, GL_FLOAT, GL_FALSE, 7 * sizeof(GL_FLOAT), (void*)(3 * sizeof(float)));
 
     // Draw Arrays
-    // Reset pointers??
-    glDrawArrays(GL_TRIANGLES, 0, 3 * 7 * sizeof(GLfloat));
-    //glDrawArrays(GL_POINTS, 0, mesh_width * mesh_height);
+    //glDrawArrays(GL_TRIANGLES, 0, 3 * 7 * sizeof(GLfloat));
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_texvbo);
+    glDrawArrays(GL_POINTS, 0, mesh_width * mesh_height);
     glFlush();
     
     glfwSwapBuffers(window);
     glfwPollEvents();
 
     g_fAnim += 0.01f;
+
+    glBindTexture(GL_TEXTURE_2D, 0);
 
     //sdkStopTimer(&timer);
     //computeFPS();
@@ -594,15 +685,19 @@ void glfw_cursor_pos_callback(GLFWwindow* window, double xpos, double ypos) {
     dy = (double)(ypos - glfw_mouse_old_y);
 
     if (mouse_buttons & (1 << GLFW_MOUSE_BUTTON_LEFT)) {
-        rotate_x += dy * 0.02f;
-        rotate_y += dx * 0.02f;
+        rotate_x = dy * 0.2f;
+        rotate_y = dx * 0.2f;
+        glm::mat4 transform(1.f);
+        transform = glm::rotate(transform, glm::radians(rotate_x), glm::vec3(1, 0, 0));
+        transform = glm::rotate(transform, glm::radians(rotate_y), glm::vec3(0, 1, 0));
+        g_modelMTX = transform * g_modelMTX;
     }
     else if (mouse_buttons & (1 << GLFW_MOUSE_BUTTON_RIGHT)) {
         translate_z += dy * 0.001f;
     }
 
-    mouse_old_x = xpos;
-    mouse_old_y = ypos;
+    glfw_mouse_old_x = xpos;
+    glfw_mouse_old_y = ypos;
 }
 
 void motion(int x, int y)
