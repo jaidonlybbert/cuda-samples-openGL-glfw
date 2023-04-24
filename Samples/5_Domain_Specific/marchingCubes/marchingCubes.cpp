@@ -144,9 +144,9 @@ extern "C" void ThrustScanWrapper(unsigned int *output, unsigned int *input,
 const unsigned int window_width = 512;
 const unsigned int window_height = 512;
 
-const char *volumeFilename = "Bucky.raw";
+char* volumeFilename = "tooth_103x94x161_uint8.raw";//"Bucky.raw";//"tooth_103x94x161_uint8.raw";//"CT-Foot_256x256x256_8bit.raw";//"Bucky.raw";//"MRI-Head_256x256x256_8bit.raw";
 
-uint3 gridSizeLog2 = make_uint3(5, 5, 5);
+uint3 gridSizeLog2 = make_uint3(8, 8, 8);////make_uint3(5, 5, 5);//make_uint3(7, 7, 8);
 uint3 gridSizeShift;
 uint3 gridSize;
 uint3 gridSizeMask;
@@ -404,33 +404,51 @@ int main(int argc, char **argv) {
 ////////////////////////////////////////////////////////////////////////////////
 void initMC(int argc, char **argv) {
   // parse command line arguments
-  int n;
+  //int n;
 
-  if (checkCmdLineFlag(argc, (const char **)argv, "grid")) {
-    n = getCmdLineArgumentInt(argc, (const char **)argv, "grid");
-    gridSizeLog2.x = gridSizeLog2.y = gridSizeLog2.z = n;
+  //if (checkCmdLineFlag(argc, (const char **)argv, "grid")) {
+  //  n = getCmdLineArgumentInt(argc, (const char **)argv, "grid");
+  //  gridSizeLog2.x = gridSizeLog2.y = gridSizeLog2.z = n;
+  //}
+
+  //if (checkCmdLineFlag(argc, (const char **)argv, "gridx")) {
+  //  n = getCmdLineArgumentInt(argc, (const char **)argv, "gridx");
+  //  gridSizeLog2.x = n;
+  //}
+
+  //if (checkCmdLineFlag(argc, (const char **)argv, "gridx")) {
+  //  n = getCmdLineArgumentInt(argc, (const char **)argv, "gridx");
+  //  gridSizeLog2.y = n;
+  //}
+
+  //if (checkCmdLineFlag(argc, (const char **)argv, "gridz")) {
+  //  n = getCmdLineArgumentInt(argc, (const char **)argv, "gridz");
+  //  gridSizeLog2.z = n;
+  //}
+
+  if (checkCmdLineFlag(argc, (const char**)argv, "bucky")) {
+      gridSizeLog2 = make_uint3(5, 5, 5);
+      //gridSize = make_uint3(32, 32, 32);
+      volumeFilename = "Bucky.raw";
+  }
+  else if (checkCmdLineFlag(argc, (const char**)argv, "foot")) {
+      gridSizeLog2 = make_uint3(8, 8, 8);
+      volumeFilename = "CT-Foot_256x256x256_8bit.raw";
+  }
+  else if (checkCmdLineFlag(argc, (const char**)argv, "head")) {
+      gridSizeLog2 = make_uint3(8, 8, 8);
+      volumeFilename = "MRI-Head_256x256x256_8bit.raw";
+  }
+  else if (checkCmdLineFlag(argc, (const char**)argv, "tooth")) {
+      gridSizeLog2 = make_uint3(7, 7, 8);
+      volumeFilename = "tooth_103x94x161_uint8.raw";
   }
 
-  if (checkCmdLineFlag(argc, (const char **)argv, "gridx")) {
-    n = getCmdLineArgumentInt(argc, (const char **)argv, "gridx");
-    gridSizeLog2.x = n;
-  }
+  //char *filename;
 
-  if (checkCmdLineFlag(argc, (const char **)argv, "gridx")) {
-    n = getCmdLineArgumentInt(argc, (const char **)argv, "gridx");
-    gridSizeLog2.y = n;
-  }
-
-  if (checkCmdLineFlag(argc, (const char **)argv, "gridz")) {
-    n = getCmdLineArgumentInt(argc, (const char **)argv, "gridz");
-    gridSizeLog2.z = n;
-  }
-
-  char *filename;
-
-  if (getCmdLineArgumentString(argc, (const char **)argv, "file", &filename)) {
-    volumeFilename = filename;
-  }
+  //if (getCmdLineArgumentString(argc, (const char **)argv, "file", &filename)) {
+  //  volumeFilename = filename;
+  //}
 
   gridSize =
       make_uint3(1 << gridSizeLog2.x, 1 << gridSizeLog2.y, 1 << gridSizeLog2.z);
@@ -457,8 +475,36 @@ void initMC(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
-  int size = gridSize.x * gridSize.y * gridSize.z * sizeof(uchar);
-  uchar *volume = loadRawFile(path, size);
+  int size = 0;
+  uchar* volume = NULL;
+  if (checkCmdLineFlag(argc, (const char**)argv, "tooth")) { // special case odd shaped dataset
+      size = gridSize.x * gridSize.y * gridSize.z * sizeof(uchar);
+
+      uchar* tooth_original = loadRawFile(path, 103 * 94 * 161 * sizeof(uchar));
+      volume = (uchar*)malloc(size);
+
+      for (int slice = 0; slice < gridSize.z; slice++) {
+          for (int row = 0; row < gridSize.y; row++) {
+              for (int col = 0; col < gridSize.x; col++) {
+                  if (slice < 161 && row < 94 && col < 103) {
+
+                      volume[slice * gridSize.x * gridSize.y + row * gridSize.x + col] = tooth_original[slice * 94 * 103 + row * 103 + col];
+                      
+                  }
+                  else {
+                      volume[slice * gridSize.x * gridSize.y + row * gridSize.x + col] = 0;
+                  }
+              }
+          }
+      }
+  }
+  else {
+      size = gridSize.x * gridSize.y * gridSize.z * sizeof(uchar);
+      volume = loadRawFile(path, size);
+  }
+
+  assert(volume);
+  
   checkCudaErrors(cudaMalloc((void **)&d_volume, size));
   checkCudaErrors(cudaMemcpy(d_volume, volume, size, cudaMemcpyHostToDevice));
   free(volume);
